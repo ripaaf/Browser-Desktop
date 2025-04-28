@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Virtual Desktop</title>
+    <link rel="stylesheet" type="text/css" media="screen" href="main.css" />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css"
+    />
+
+    <!-- SEO -->
+    <meta
+      name="description"
+      content="A web-based desktop interface with terminal and note apps."
+    />
+    <meta
+      name="keywords"
+      content="web desktop, terminal, note, quill, xterm, tailwind"
+    />
+    <meta name="author" content="ripaaf" />
+
+    <!-- Mobile & Web App Capabilities -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#111827" />
+
+    <!-- Favicon  -->
+    <link rel="icon" href="assets/settings.svg" type="image/x-icon" />
+
+    <!-- Quill.js WYSIWYG Editor -->
+    <link
+      href="https://cdn.quilljs.com/1.3.6/quill.snow.css"
+      rel="stylesheet"
+    />
+
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body>
+    <div class="desktop relative w-full h-screen" id="desktop">
+      <div class="icon" id="terminal-icon">
+        <img src="assets/terminal.svg" alt="Terminal Icon" draggable="false" />
+        <span>Terminal</span>
+      </div>
+      <div class="icon" id="note-icon">
+        <img src="assets/note.svg" alt="Note Icon" draggable="false" />
+        <span>Note</span>
+      </div>
+      <div class="icon" id="settings-icon">
+        <img src="assets/settings.svg" alt="Settings Icon" draggable="false" />
+        <span>Settings</span>
+      </div>
+
+      <div id="selection-box" class="selection-box"></div>
+      <div id="background-overlay"></div>
+    </div>
+
+    <div id="taskbar" class="taskbar">
+      <div class="taskbar-info">
+        <div id="current-date"></div>
+        <div class="current-time" id="current-time"></div>
+      </div>
+
+      <div id="datetime-container">
+        <span id="current-time"></span>
+        <span id="current-date"></span>
+        <div id="calendar-popup" class="hidden"></div>
+      </div>
+    </div>
+
+    <ul
+      id="context-menu"
+      class="hidden absolute bg-black/30 shadow-md rounded-sm text-sm z-50 w-48 text-white"
+    >
+      <li
+        id="create-note"
+        class="px-4 py-2 hover:bg-black/40 rounded-sm cursor-pointer"
+      >
+        New Note
+      </li>
+      <!-- <li class="border-t my-1"></li> -->
+      <li id="rename-file" class="px-4 py-2 hover:bg-black/40 cursor-pointer">
+        Rename
+      </li>
+      <li
+        id="delete-icon"
+        class="px-4 py-2 hover:bg-black/40 text-red-500 cursor-pointer"
+      >
+        Delete
+      </li>
+    </ul>
+  </body>
+
+  <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+  <script src="https://cdn.quilljs.com/1.3.7/quill.min.js"></script>
+  <script src="window.js"></script>
+
+  <script>
+    const wm = new WindowManager("desktop");
+    document.getElementById("note-icon").ondblclick = () =>
+      wm.createWindow("note");
+    document.getElementById("terminal-icon").ondblclick = () =>
+      wm.createWindow("terminal");
+    document.getElementById("settings-icon").ondblclick = () =>
+      wm.createWindow("settings");
+  </script>
+
+  <!-- ICON BEHAVIOR -->
+  <script>
+    function isOverlapping(rect1, rect2) {
+      return !(
+        rect1.right <= rect2.left ||
+        rect1.left >= rect2.right ||
+        rect1.bottom <= rect2.top ||
+        rect1.top >= rect2.bottom
+      );
+    }
+
+    function findNonOverlappingPosition(draggedIcon) {
+      const icons = Array.from(document.querySelectorAll(".icon")).filter(
+        (icon) => icon !== draggedIcon
+      );
+      const draggedRect = draggedIcon.getBoundingClientRect();
+      const desktopRect = desktop.getBoundingClientRect();
+
+      // Ensure it's not outside top/left
+      let currentTop = parseInt(draggedIcon.style.top);
+      let currentLeft = parseInt(draggedIcon.style.left);
+
+      currentTop = Math.max(0, currentTop);
+      currentLeft = Math.max(0, currentLeft);
+
+      draggedIcon.style.top = `${currentTop}px`;
+      draggedIcon.style.left = `${currentLeft}px`;
+
+      const correctedRect = draggedIcon.getBoundingClientRect();
+      const overlapping = icons.some((icon) => {
+        const otherRect = icon.getBoundingClientRect();
+        return isOverlapping(correctedRect, otherRect);
+      });
+
+      // If no overlap, allow current corrected position
+      if (!overlapping) return;
+
+      // Try to find a nearby non-overlapping position
+      const gridSize = 90;
+      for (let offset = 1; offset < 10; offset++) {
+        for (let dy = -offset; dy <= offset; dy++) {
+          for (let dx = -offset; dx <= offset; dx++) {
+            if (Math.abs(dx) !== offset && Math.abs(dy) !== offset) continue; // only border
+            const newTop = Math.max(0, currentTop + dy * gridSize);
+            const newLeft = Math.max(0, currentLeft + dx * gridSize);
+
+            draggedIcon.style.top = `${newTop}px`;
+            draggedIcon.style.left = `${newLeft}px`;
+
+            const testRect = draggedIcon.getBoundingClientRect();
+            const collides = icons.some((icon) =>
+              isOverlapping(testRect, icon.getBoundingClientRect())
+            );
+            if (!collides) return;
+          }
+        }
+      }
+    }
+
+    let isIconDragging = false;
+    let iconOffsetX, iconOffsetY;
+    let selectedIconsStart = [];
+
+    function getClientPosition(e) {
+      if (e.touches && e.touches.length > 0) {
+        return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      }
+      return { x: e.clientX, y: e.clientY };
+    }
+
+    function handleDragStart(e) {
+      const icon = e.target.closest(".icon");
+      if (!icon) return;
+
+      // e.preventDefault(); // Prevent touch scrolling
+
+      isIconDragging = true;
+
+      const desktopRect = desktop.getBoundingClientRect();
+      const iconRect = icon.getBoundingClientRect();
+      const { x, y } = getClientPosition(e);
+
+      iconOffsetX = x - iconRect.left;
+      iconOffsetY = y - iconRect.top;
+
+      if (e.ctrlKey || e.metaKey) {
+        icon.classList.toggle("selected");
+      } else {
+        if (!icon.classList.contains("selected")) {
+          document
+            .querySelectorAll(".icon.selected")
+            .forEach((i) => i.classList.remove("selected"));
+          icon.classList.add("selected");
+        }
+      }
+
+      const selectedIcons = document.querySelectorAll(".icon.selected");
+      selectedIconsStart = Array.from(selectedIcons).map((el) => {
+        const rect = el.getBoundingClientRect();
+        return {
+          el,
+          startLeft: rect.left - desktopRect.left,
+          startTop: rect.top - desktopRect.top,
+        };
+      });
+
+      selectedIconsStart.forEach(({ el, startLeft, startTop }) => {
+        el.style.position = "absolute";
+        el.style.left = `${startLeft}px`;
+        el.style.top = `${startTop}px`;
+        el.style.zIndex = 1000;
+        el.classList.add("dragging");
+      });
+    }
+
+    function handleDragging(e) {
+      if (!isIconDragging) return;
+
+      const desktopRect = desktop.getBoundingClientRect();
+      const { x, y } = getClientPosition(e);
+      const dx =
+        x - desktopRect.left - iconOffsetX - selectedIconsStart[0].startLeft;
+      const dy =
+        y - desktopRect.top - iconOffsetY - selectedIconsStart[0].startTop;
+      const gridSize = 90;
+
+      selectedIconsStart.forEach(({ el, startLeft, startTop }) => {
+        let newLeft = startLeft + dx;
+        let newTop = startTop + dy;
+
+        newLeft = Math.round(newLeft / gridSize) * gridSize;
+        newTop = Math.round(newTop / gridSize) * gridSize;
+
+        el.style.left = `${newLeft}px`;
+        el.style.top = `${newTop}px`;
+      });
+    }
+
+    function handleDragEnd() {
+      if (!isIconDragging) return;
+
+      document.querySelectorAll(".icon.dragging").forEach((icon) => {
+        findNonOverlappingPosition(icon);
+        icon.classList.remove("dragging");
+        icon.style.zIndex = "";
+
+        localStorage.setItem(
+          icon.id + "-position",
+          JSON.stringify({
+            left: icon.style.left,
+            top: icon.style.top,
+          })
+        );
+      });
+
+      isIconDragging = false;
+      selectedIconsStart = [];
+    }
+
+    // Add both mouse and touch event listeners
+    desktop.addEventListener("mousedown", handleDragStart);
+    desktop.addEventListener("mousemove", handleDragging);
+    desktop.addEventListener("mouseup", handleDragEnd);
+
+    desktop.addEventListener("touchstart", handleDragStart, { passive: false });
+    desktop.addEventListener("touchmove", handleDragging, { passive: false });
+    desktop.addEventListener("touchend", handleDragEnd);
+
+    window.addEventListener("load", () => {
+      const icons = document.querySelectorAll(".icon");
+      icons.forEach((icon, index) => {
+        // If it doesn't already have an ID, assign one
+        if (!icon.id) {
+          icon.id = `icon-${index}`;
+        }
+
+        // Restore position if it exists
+        const savedPosition = localStorage.getItem(icon.id + "-position");
+        if (savedPosition) {
+          const { left, top } = JSON.parse(savedPosition);
+          icon.style.position = "absolute";
+          icon.style.left = left;
+          icon.style.top = top;
+        }
+      });
+    });
+
+    localStorage.setItem(
+      icon.id + "-position",
+      JSON.stringify({
+        left: icon.style.left,
+        top: icon.style.top,
+      })
+    );
+
+    // RESET LAYOUT ICON DI DESKTOP (UNDER DEVELOPMENT)
+    document.getElementById("reset-layout").addEventListener("click", () => {
+      document.querySelectorAll(".icon").forEach((icon) => {
+        localStorage.removeItem(icon.id + "-position");
+        icon.style.position = "";
+        icon.style.left = "";
+        icon.style.top = "";
+      });
+      location.reload(); // Optional: refresh to re-layout
+    });
+  </script>
+
+  <!-- SELECTION SQUARE -->
+  <script>
+    let isSelecting = false;
+    let selectionStartX = 0;
+    let selectionStartY = 0;
+    const selectionBox = document.getElementById("selection-box");
+
+    function getClientPosition(e) {
+      if (e.touches && e.touches.length > 0) {
+        return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      }
+      return { x: e.clientX, y: e.clientY };
+    }
+
+    function startSelection(e) {
+      const { x, y } = getClientPosition(e);
+      const rect = desktop.getBoundingClientRect();
+
+      if (!e.target.closest(".icon") && !e.target.closest(".window")) {
+        isSelecting = true;
+        selectionStartX = x - rect.left;
+        selectionStartY = y - rect.top;
+
+        selectionBox.style.left = `${selectionStartX}px`;
+        selectionBox.style.top = `${selectionStartY}px`;
+        selectionBox.style.width = "0px";
+        selectionBox.style.height = "0px";
+        selectionBox.style.display = "block";
+
+        // Deselect all
+        document
+          .querySelectorAll(".icon.selected")
+          .forEach((icon) => icon.classList.remove("selected"));
+
+        if (e.cancelable) e.preventDefault(); // prevent scroll on touch
+      }
+    }
+
+    function updateSelection(e) {
+      if (!isSelecting) return;
+
+      const { x, y } = getClientPosition(e);
+      const rect = desktop.getBoundingClientRect();
+
+      const currentX = x - rect.left;
+      const currentY = y - rect.top;
+
+      const left = Math.min(selectionStartX, currentX);
+      const top = Math.min(selectionStartY, currentY);
+      const width = Math.abs(currentX - selectionStartX);
+      const height = Math.abs(currentY - selectionStartY);
+
+      selectionBox.style.left = `${left}px`;
+      selectionBox.style.top = `${top}px`;
+      selectionBox.style.width = `${width}px`;
+      selectionBox.style.height = `${height}px`;
+
+      const boxRect = selectionBox.getBoundingClientRect();
+      document.querySelectorAll(".icon").forEach((icon) => {
+        const iconRect = icon.getBoundingClientRect();
+        const overlaps = !(
+          boxRect.right < iconRect.left ||
+          boxRect.left > iconRect.right ||
+          boxRect.bottom < iconRect.top ||
+          boxRect.top > iconRect.bottom
+        );
+
+        if (overlaps) {
+          icon.classList.add("selected");
+        } else {
+          icon.classList.remove("selected");
+        }
+      });
+
+      if (e.cancelable) e.preventDefault(); // prevent scroll while dragging
+    }
+
+    function endSelection(e) {
+      if (isSelecting) {
+        isSelecting = false;
+        selectionBox.style.display = "none";
+      }
+    }
+
+    // Mouse events
+    desktop.addEventListener("mousedown", startSelection);
+    desktop.addEventListener("mousemove", updateSelection);
+    desktop.addEventListener("mouseup", endSelection);
+
+    // Touch events
+    desktop.addEventListener("touchstart", startSelection, { passive: false });
+    desktop.addEventListener("touchmove", updateSelection, { passive: false });
+    desktop.addEventListener("touchend", endSelection);
+  </script>
+
+  <!-- TIME -->
+  <script>
+    function updateTimeAndDate() {
+      const now = new Date();
+      const hours = now.getHours().toString().padStart(2, "0");
+      const minutes = now.getMinutes().toString().padStart(2, "0");
+      const timeString = `${hours}:${minutes}`;
+      document.getElementById("current-time").textContent = timeString;
+
+      const dateString = now.toLocaleDateString("en-GB"); // Format: DD/MM/YYYY
+      document.getElementById("current-date").textContent = dateString;
+
+      const fullDateString = now.toLocaleDateString("en-US", {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      });
+
+      // Add hover effect to show full date
+      const currentDateElement = document.getElementById("current-date");
+      currentDateElement.title = fullDateString; // Tooltip with full date
+    }
+
+    // Initial call
+    updateTimeAndDate();
+
+    // Update every minute
+    setInterval(updateTimeAndDate, 1000); // change to 60000 if you only want it to update every minute
+  </script>
+
+  <!-- LOAD NOTE TO DESKTOP -->
+  <script>
+    window.addEventListener("DOMContentLoaded", () => {
+      const saved = localStorage.getItem("notes");
+      if (!saved) return;
+
+      const notes = JSON.parse(saved);
+      notes.forEach((note) => {
+        const icon = document.createElement("div");
+        icon.className = "icon";
+        icon.id = `icon-${note.id}`;
+        icon.innerHTML = `
+            <img src="assets/note-save.svg" alt="Note Icon" draggable="false" />
+            <span>${note.id}</span>
+        `;
+        icon.style.position = "absolute";
+        icon.style.left = `${Math.random() * 80}px`;
+        icon.style.top = `${Math.random() * 80}px`;
+        icon.dataset.noteContent = note.content;
+
+        icon.ondblclick = () => {
+          wm.createWindow("note", note.content, note.id);
+        };
+
+        document.getElementById("desktop").appendChild(icon);
+      });
+    });
+  </script>
+
+  <!-- RIGHT CLICK DELETE -->
+  <script>
+    let undoStack = [];
+    const contextMenu = document.getElementById("context-menu");
+    let rightClickedIcon = null;
+    let lastTouchTime = 0;
+    let contextX = 0,
+      contextY = 0;
+
+    document.addEventListener("contextmenu", (e) => {
+      // Only trigger context menu if right-click is on the desktop or its icons
+      const desktop = document.getElementById("desktop");
+      if (!desktop.contains(e.target)) {
+        return; // Ignore right-clicks outside the desktop
+      }
+
+      e.preventDefault();
+
+      const targetIcon = e.target.closest(".icon");
+      const { clientX: mouseX, clientY: mouseY } = e;
+
+      contextX = mouseX;
+      contextY = mouseY;
+
+      contextMenu.style.left = `${mouseX}px`;
+      contextMenu.style.top = `${mouseY}px`;
+      contextMenu.classList.remove("hidden");
+
+      const selectedIcons = document.querySelectorAll(".icon.selected");
+
+      if (targetIcon || selectedIcons.length > 0) {
+        rightClickedIcon = targetIcon;
+        document.getElementById("delete-icon").classList.remove("hidden");
+
+        // Only allow renaming when a single icon is right-clicked
+        if (targetIcon && selectedIcons.length <= 1) {
+          document.getElementById("rename-file").classList.remove("hidden");
+        } else {
+          document.getElementById("rename-file").classList.add("hidden");
+        }
+      } else {
+        rightClickedIcon = null;
+        document.getElementById("delete-icon").classList.add("hidden");
+        document.getElementById("rename-file").classList.add("hidden");
+      }
+    });
+
+    // Hide context menu on left-click
+    document.addEventListener("click", (e) => {
+      if (!contextMenu.contains(e.target)) {
+        contextMenu.classList.add("hidden");
+        rightClickedIcon = null;
+      }
+    });
+
+    // Delete icon
+    document.getElementById("delete-icon").addEventListener("click", () => {
+      const selectedIcons = document.querySelectorAll(".icon.selected");
+      const iconsToDelete =
+        selectedIcons.length > 0
+          ? selectedIcons
+          : rightClickedIcon
+          ? [rightClickedIcon]
+          : [];
+
+      iconsToDelete.forEach((icon) => {
+        const id = icon.id.replace("icon-", "");
+        const noteContent = icon.dataset.noteContent;
+
+        // Save to undo stack
+        undoStack.push({
+          id: icon.id,
+          content: noteContent,
+          position: {
+            left: icon.style.left,
+            top: icon.style.top,
+          },
+          name: icon.querySelector("span").textContent,
+        });
+
+        icon.remove();
+        localStorage.removeItem(icon.id + "-position");
+
+        const saved = localStorage.getItem("notes");
+        if (saved) {
+          const notes = JSON.parse(saved).filter((note) => note.id !== id);
+          localStorage.setItem("notes", JSON.stringify(notes));
+        }
+      });
+
+      contextMenu.classList.add("hidden");
+      rightClickedIcon = null;
+
+      const saved = localStorage.getItem("notes");
+      if (saved) {
+        const notes = JSON.parse(saved).filter((note) => note.id !== id);
+        localStorage.setItem("notes", JSON.stringify(notes));
+      }
+
+      contextMenu.classList.add("hidden");
+    });
+
+    // Create new note
+    document.getElementById("create-note").addEventListener("click", () => {
+      const noteId = `note-${Date.now()}`;
+      const noteContent = "New Note";
+
+      // Save note to localStorage
+      const saved = localStorage.getItem("notes");
+      const notes = saved ? JSON.parse(saved) : [];
+      notes.push({ id: noteId, content: noteContent });
+      localStorage.setItem("notes", JSON.stringify(notes));
+
+      // Create note icon
+      const icon = document.createElement("div");
+      icon.className = "icon";
+      icon.id = `icon-${noteId}`;
+      icon.innerHTML = `
+            <img src="assets/note-save.svg" alt="Note Icon" draggable="false" />
+            <span>${noteId}</span>
+        `;
+      icon.style.position = "absolute";
+      icon.style.left = `${contextX}px`;
+      icon.style.top = `${contextY}px`;
+      icon.dataset.noteContent = noteContent;
+
+      icon.ondblclick = () => {
+        wm.createWindow("note", noteContent, noteId);
+      };
+
+      document.getElementById("desktop").appendChild(icon);
+
+      contextMenu.classList.add("hidden");
+    });
+
+    // Rename note
+    document.getElementById("rename-file").addEventListener("click", () => {
+      if (!rightClickedIcon) return;
+
+      const currentName = rightClickedIcon.querySelector("span").textContent;
+      const newName = prompt("Enter new name for the note:", currentName);
+
+      if (newName && newName.trim() !== "") {
+        const id = rightClickedIcon.id.replace("icon-", "");
+
+        // Update the icon's display name
+        rightClickedIcon.querySelector("span").textContent = newName;
+
+        // Update the note in localStorage
+        const saved = localStorage.getItem("notes");
+        if (saved) {
+          const notes = JSON.parse(saved).map((note) => {
+            if (note.id === id) {
+              note.id = newName; // Update the note ID
+            }
+            return note;
+          });
+          localStorage.setItem("notes", JSON.stringify(notes));
+        }
+
+        // Update the icon's ID
+        rightClickedIcon.id = `icon-${newName}`;
+      }
+
+      contextMenu.classList.add("hidden");
+    });
+
+    document.querySelectorAll(".window").forEach((win) => {
+      win.addEventListener("contextmenu", (e) => {
+        e.preventDefault(); // Disable the default right-click menu
+        e.stopPropagation(); // Prevent the global handler from firing
+      });
+    });
+
+    document.addEventListener("contextmenu", (e) => {
+      e.preventDefault(); // Disable the default right-click menu globally
+    });
+
+    let initialDistance = null;
+    let zooming = false;
+
+    document.addEventListener(
+      "touchstart",
+      (e) => {
+        if (e.touches.length === 3) {
+          // 3-finger tap => right-click trigger
+          const x =
+            (e.touches[0].clientX +
+              e.touches[1].clientX +
+              e.touches[2].clientX) /
+            3;
+          const y =
+            (e.touches[0].clientY +
+              e.touches[1].clientY +
+              e.touches[2].clientY) /
+            3;
+
+          const touchedElement = document.elementFromPoint(x, y);
+          const targetIcon = touchedElement?.closest(".icon");
+          const desktop = document.getElementById("desktop");
+
+          if (!desktop.contains(touchedElement)) return;
+
+          e.preventDefault();
+
+          contextX = x;
+          contextY = y;
+
+          contextMenu.style.left = `${x}px`;
+          contextMenu.style.top = `${y}px`;
+          contextMenu.classList.remove("hidden");
+
+          const selectedIcons = document.querySelectorAll(".icon.selected");
+
+          if (targetIcon || selectedIcons.length > 0) {
+            rightClickedIcon = targetIcon;
+            document.getElementById("delete-icon").classList.remove("hidden");
+
+            // Only allow renaming when a single icon is right-clicked
+            if (targetIcon && selectedIcons.length <= 1) {
+              document.getElementById("rename-file").classList.remove("hidden");
+            } else {
+              document.getElementById("rename-file").classList.add("hidden");
+            }
+          } else {
+            rightClickedIcon = null;
+            document.getElementById("delete-icon").classList.add("hidden");
+            document.getElementById("rename-file").classList.add("hidden");
+          }
+        }
+
+        // REMOVE THIS FOR PINCH TWO FINGER
+        if (e.touches.length === 2) {
+          const dx = e.touches[0].clientX - e.touches[1].clientX;
+          const dy = e.touches[0].clientY - e.touches[1].clientY;
+          initialDistance = Math.sqrt(dx * dx + dy * dy);
+          zooming = true;
+        }
+      },
+      { passive: false }
+    );
+
+    document.addEventListener(
+      "touchstart",
+      (e) => {
+        if (e.touches.length === 1 && !contextMenu.contains(e.target)) {
+          contextMenu.classList.add("hidden");
+          rightClickedIcon = null;
+        }
+      },
+      { passive: true }
+    );
+
+    document.addEventListener(
+      "touchmove",
+      (e) => {
+        if (zooming && e.touches.length === 2 && initialDistance !== null) {
+          const dx = e.touches[0].clientX - e.touches[1].clientX;
+          const dy = e.touches[0].clientY - e.touches[1].clientY;
+          const newDistance = Math.sqrt(dx * dx + dy * dy);
+
+          const scale = newDistance / initialDistance;
+
+          // Apply scale to desktop or content
+          const desktop = document.getElementById("desktop");
+          desktop.style.transform = `scale(${scale})`;
+
+          // Prevent scroll
+          e.preventDefault();
+        }
+      },
+      { passive: false }
+    );
+
+    document.addEventListener("keydown", (e) => {
+      if (e.ctrlKey && e.key === "z" && undoStack.length > 0) {
+        const lastDeleted = undoStack.pop();
+
+        // Restore note data in localStorage
+        const saved = localStorage.getItem("notes");
+        const notes = saved ? JSON.parse(saved) : [];
+        notes.push({
+          id: lastDeleted.id.replace("icon-", ""),
+          content: lastDeleted.content,
+        });
+        localStorage.setItem("notes", JSON.stringify(notes));
+
+        // Restore icon
+        const icon = document.createElement("div");
+        icon.className = "icon";
+        icon.id = lastDeleted.id;
+        icon.innerHTML = `
+                <img src="assets/note.svg" alt="Note Icon" draggable="false" />
+                <span>${lastDeleted.name}</span>
+            `;
+        icon.style.position = "absolute";
+        icon.style.left = lastDeleted.position.left;
+        icon.style.top = lastDeleted.position.top;
+        icon.dataset.noteContent = lastDeleted.content;
+
+        icon.ondblclick = () => {
+          wm.createWindow(
+            "note",
+            lastDeleted.content,
+            lastDeleted.id.replace("icon-", "")
+          );
+        };
+
+        document.getElementById("desktop").appendChild(icon);
+      }
+    });
+
+    document.addEventListener("touchend", (e) => {
+      if (e.touches.length < 2) {
+        initialDistance = null;
+        zooming = false;
+
+        // Reset zoom after pinch (optional)
+        // document.getElementById("desktop").style.transform = "";
+      }
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Delete" || e.key === "Backspace") {
+        const selectedIcons = document.querySelectorAll(".icon.selected");
+
+        if (selectedIcons.length === 0) return;
+
+        selectedIcons.forEach((icon) => {
+          const id = icon.id.replace("icon-", "");
+
+          icon.remove();
+          localStorage.removeItem(icon.id + "-position");
+
+          const saved = localStorage.getItem("notes");
+          if (saved) {
+            const notes = JSON.parse(saved).filter((note) => note.id !== id);
+            localStorage.setItem("notes", JSON.stringify(notes));
+          }
+        });
+      }
+    });
+  </script>
+
+  <!-- SETTING COFIGURATION -->
+  <script>
+    window.onload = () => {
+      const taskbar = document.getElementById("taskbar");
+      const desktop = document.getElementById("desktop");
+      const bgOverlay = document.getElementById("background-overlay");
+
+      if (!desktop || !taskbar) return;
+
+      const taskbarColor = localStorage.getItem("taskbarColor");
+      const taskbarOpacity = localStorage.getItem("taskbarOpacity");
+      const taskbarShadowEnabled =
+        localStorage.getItem("taskbarShadow") === "true";
+      const desktopBgColor = localStorage.getItem("desktopBgColor");
+      const desktopBgImage = localStorage.getItem("desktopBgImage");
+      const bgOpacity = localStorage.getItem("bgOpacity");
+      const bgSize = localStorage.getItem("bgSize") || "cover";
+      const bgPosition = localStorage.getItem("bgPosition") || "center";
+      const bgRepeat = localStorage.getItem("bgRepeat") || "no-repeat";
+
+      if (desktopBgImage) {
+        desktop.style.backgroundImage = `url(${desktopBgImage})`;
+      } else {
+        desktop.style.backgroundImage = "none";
+      }
+
+      if (taskbarShadowEnabled) {
+        taskbar.style.boxShadow = "0 -2px 5px rgba(0, 0, 0, 0.5)";
+      } else {
+        taskbar.style.boxShadow = "none";
+      }
+
+      desktop.style.backgroundSize = bgSize;
+      desktop.style.backgroundPosition = bgPosition;
+      desktop.style.backgroundRepeat = bgRepeat;
+
+      bgOverlay.style.opacity = bgOpacity;
+
+      if (desktopBgColor) desktop.style.backgroundColor = desktopBgColor;
+
+      function applyTaskbarStyle(colorHex, opacity = 1) {
+        if (!colorHex) return;
+        const hex = colorHex.replace("#", "");
+        const r = parseInt(hex.substring(0, 2), 16);
+        const g = parseInt(hex.substring(2, 4), 16);
+        const b = parseInt(hex.substring(4, 6), 16);
+        taskbar.style.backgroundColor = `rgba(${r}, ${g}, ${b}, ${opacity})`;
+        console.log(
+          `Taskbar color applied: rgba(${r}, ${g}, ${b}, ${opacity})`
+        );
+      }
+
+      if (taskbarColor) {
+        const opacity = parseFloat(taskbarOpacity) || taskbarOpacity;
+        applyTaskbarStyle(taskbarColor, opacity);
+      }
+
+      updateAllIcons(); // make sure this runs after the DOM is ready
+    };
+
+    function updateAllIcons() {
+      const noteIcon = localStorage.getItem("icon_note") || "assets/note.svg";
+      const terminalIcon =
+        localStorage.getItem("icon_terminal") || "assets/terminal.svg";
+      const settingsIcon =
+        localStorage.getItem("icon_settings") || "assets/settings.svg";
+
+      document.querySelectorAll(".icon").forEach((icon) => {
+        const span = icon.querySelector("span");
+        const img = icon.querySelector("img");
+        if (!img || !span) return;
+
+        const label = span.textContent.toLowerCase();
+        if (label.includes("note")) {
+          img.src = noteIcon;
+        } else if (label.includes("terminal")) {
+          img.src = terminalIcon;
+        } else if (label.includes("settings")) {
+          img.src = settingsIcon;
+        }
+      });
+
+      // Also update taskbar icons if you show them there
+      document.querySelectorAll(".taskbar-icon img").forEach((img) => {
+        const appType = img.dataset.appType;
+        if (appType === "note")
+          img.src = localStorage.getItem("icon_note") || "assets/note.svg";
+        if (appType === "terminal")
+          img.src =
+            localStorage.getItem("icon_terminal") || "assets/terminal.svg";
+        if (appType === "settings")
+          img.src =
+            localStorage.getItem("icon_settings") || "assets/settings.svg";
+      });
+    }
+
+    updateAllIcons();
+
+    window.addEventListener("DOMContentLoaded", () => {
+      const resetBtn = document.querySelector("#reset-bg-style");
+      const bgSizeSelect = document.querySelector("#bg-size-select");
+      const bgPositionSelect = document.querySelector("#bg-position-select");
+      const bgRepeatSelect = document.querySelector("#bg-repeat-select");
+
+      if (resetBtn && bgSizeSelect && bgPositionSelect && bgRepeatSelect) {
+        resetBtn.onclick = () => {
+          bgSizeSelect.value = "cover";
+          bgPositionSelect.value = "center";
+          bgRepeatSelect.value = "no-repeat";
+
+          desktop.style.backgroundSize = "cover";
+          desktop.style.backgroundPosition = "center";
+          desktop.style.backgroundRepeat = "no-repeat";
+
+          localStorage.setItem("bgSize", "cover");
+          localStorage.setItem("bgPosition", "center");
+          localStorage.setItem("bgRepeat", "no-repeat");
+        };
+      }
+    });
+  </script>
+</html>
